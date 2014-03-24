@@ -45,6 +45,7 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.Utils;
+import org.apache.hadoop.mapreduce.TaskAttemptContext;
 
 import parquet.Log;
 import parquet.bytes.BytesInput;
@@ -70,6 +71,11 @@ import parquet.io.ParquetDecodingException;
  *
  */
 public class ParquetFileReader implements Closeable {
+  
+  public static final String READSUMMARIES_THREADS = "parquet.filereader.readsummaries.threads";
+  public static final int DEFAULT_READSUMMARIES_THREADS = 5;
+  public static final String READFOOTERS_THREADS = "parquet.filereader.readfooters.threads";
+  public static final int DEFAULT_READFOOTERS_THREADS = 5;
 
   private static final Log LOG = Log.getLog(ParquetFileReader.class);
 
@@ -83,8 +89,10 @@ public class ParquetFileReader implements Closeable {
    * @return the footers for those files using the summary file if possible.
    * @throws IOException
    */
-  public static List<Footer> readAllFootersInParallelUsingSummaryFiles(final Configuration configuration, List<FileStatus> partFiles) throws IOException {
-
+  public static List<Footer> readAllFootersInParallelUsingSummaryFiles(final Configuration configuration, List<FileStatus> partFiles, TaskAttemptContext taskAttemptContext) throws IOException {
+    
+    int threads = configuration.getInt(READSUMMARIES_THREADS, DEFAULT_READSUMMARIES_THREADS);
+    
     // figure out list of all parents to part files
     Set<Path> parents = new HashSet<Path>();
     for (FileStatus part : partFiles) {
@@ -119,7 +127,7 @@ public class ParquetFileReader implements Closeable {
 
     Map<Path, Footer> cache = new HashMap<Path, Footer>();
     try {
-      List<Map<Path, Footer>> footersFromSummaries = runAllInParallel(5, summaries);
+      List<Map<Path, Footer>> footersFromSummaries = runAllInParallel(threads, summaries);
       for (Map<Path, Footer> footers : footersFromSummaries) {
         cache.putAll(footers);
       }
@@ -142,13 +150,18 @@ public class ParquetFileReader implements Closeable {
     if (toRead.size() > 0) {
       // read the footers of the files that did not have a summary file
       if (Log.INFO) LOG.info("reading another " + toRead.size() + " footers");
-      result.addAll(readAllFootersInParallel(configuration, toRead));
+      result.addAll(readAllFootersInParallel(configuration, toRead, taskAttemptContext));
     }
 
     return result;
   }
+  
+  public static List<Footer> readAllFootersInParallelUsingSummaryFiles(final Configuration configuration, List<FileStatus> partFiles) throws IOException {
+    return readAllFootersInParallel(configuration, partFiles, null);
+  }
 
-  private static <T> List<T> runAllInParallel(int parallelism, List<Callable<T>> toRun) throws ExecutionException {
+  private static <T> List<T> runAllInParallel(int parallelism, List<Callable<T>> toRun, TaskAttemptContext taskAttemptContext) throws ExecutionException {
+    LOG.debug("Running with " + parallelism + " threads");
     ExecutorService threadPool = Executors.newFixedThreadPool(parallelism);
     try {
       List<Future<T>> futures = new ArrayList<Future<T>>();
@@ -162,14 +175,24 @@ public class ParquetFileReader implements Closeable {
         } catch (InterruptedException e) {
           throw new RuntimeException("The thread was interrupted", e);
         }
+        
+        if (taskAttemptContext != null) {
+          taskAttemptContext.progress();
+        }
       }
       return result;
     } finally {
       threadPool.shutdownNow();
     }
   }
+  
+  private static <T> List<T> runAllInParallel(int parallelism, List<Callable<T>> toRun) throws ExecutionException {
+    return runAllInParallel(parallelism, toRun, null);
+  }
 
-  public static List<Footer> readAllFootersInParallel(final Configuration configuration, List<FileStatus> partFiles) throws IOException {
+  public static List<Footer> readAllFootersInParallel(final Configuration configuration, List<FileStatus> partFiles, TaskAttemptContext taskAttemptContext) throws IOException {
+    int threads = configuration.getInt(READFOOTERS_THREADS, DEFAULT_READFOOTERS_THREADS);
+    
     List<Callable<Footer>> footers = new ArrayList<Callable<Footer>>();
     for (final FileStatus currentFile : partFiles) {
       footers.add(new Callable<Footer>() {
@@ -184,13 +207,13 @@ public class ParquetFileReader implements Closeable {
       });
     }
     try {
-      return runAllInParallel(5, footers);
+      return runAllInParallel(threads, footers, taskAttemptContext);
     } catch (ExecutionException e) {
       throw new IOException("Could not read footer: " + e.getMessage(), e.getCause());
     }
   }
 
-  public static List<Footer> readAllFootersInParallel(Configuration configuration, FileStatus fileStatus) throws IOException {
+  public static List<Footer> readAllFootersInParallel(Configuration configuration, FileStatus fileStatus, TaskAttemptContext taskAttemptContext) throws IOException {
     final FileSystem fs = fileStatus.getPath().getFileSystem(configuration);
     List<FileStatus> statuses;
     if (fileStatus.isDir()) {
@@ -199,7 +222,11 @@ public class ParquetFileReader implements Closeable {
       statuses = new ArrayList<FileStatus>();
       statuses.add(fileStatus);
     }
-    return readAllFootersInParallel(configuration, statuses);
+    return readAllFootersInParallel(configuration, statuses, taskAttemptContext);
+  }
+  
+  public static List<Footer> readAllFootersInParallel(Configuration configuration, FileStatus fileStatus) throws IOException {
+    return readAllFootersInParallel(configuration, fileStatus, null);
   }
 
   public static List<Footer> readFooters(Configuration configuration, FileStatus pathStatus) throws IOException {

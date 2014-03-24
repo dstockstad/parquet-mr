@@ -32,12 +32,14 @@ import parquet.hadoop.util.ContextUtil;
 
 public class ParquetOutputCommitter extends FileOutputCommitter {
   private static final Log LOG = Log.getLog(ParquetOutputCommitter.class);
+  private TaskAttemptContext taskAttemptContext;
 
   private final Path outputPath;
 
   public ParquetOutputCommitter(Path outputPath, TaskAttemptContext context) throws IOException {
     super(outputPath, context);
     this.outputPath = outputPath;
+    this.taskAttemptContext = context;
   }
 
   public void commitJob(JobContext jobContext) throws IOException {
@@ -46,7 +48,7 @@ public class ParquetOutputCommitter extends FileOutputCommitter {
       Configuration configuration = ContextUtil.getConfiguration(jobContext);
       final FileSystem fileSystem = outputPath.getFileSystem(configuration);
       FileStatus outputStatus = fileSystem.getFileStatus(outputPath);
-      List<Footer> footers = ParquetFileReader.readAllFootersInParallel(configuration, outputStatus);
+      List<Footer> footers = ParquetFileReader.readAllFootersInParallel(configuration, outputStatus, this.taskAttemptContext);
       try {
         ParquetFileWriter.writeMetadataFile(configuration, outputPath, footers);
       } catch (Exception e) {
